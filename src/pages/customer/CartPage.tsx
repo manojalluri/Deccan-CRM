@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ArrowLeft, Trash2, MessageSquare, ShoppingBag } from 'lucide-react'
 import { useCartStore } from '@/store/cartStore'
-import { orderService, restaurantService } from '@/services'
+import { orderService, restaurantService, tableService } from '@/services'
 import { FoodTypeIndicator } from '@/components/ui'
 import { Button } from '@/components/ui/Button'
 import { formatCurrency } from '@/lib/utils'
@@ -16,7 +16,7 @@ export function CartPage() {
   const { restaurantSlug, tableToken } = useParams<{ restaurantSlug: string; tableToken: string }>()
   const {
     items, updateQuantity, removeItem, updateInstructions,
-    restaurantId, tableId, clearCart, tableNumber
+    restaurantId, tableId, clearCart, tableNumber, setTableContext
   } = useCartStore()
   const [loading, setLoading] = useState(false)
   const [customerName, setCustomerName] = useState('')
@@ -25,17 +25,38 @@ export function CartPage() {
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null)
 
   useEffect(() => {
-    const fetchRest = async () => {
-      if (restaurantId) {
-        const r = await restaurantService.getById(restaurantId)
-        if (r) setRestaurant(r)
-      } else if (restaurantSlug) {
-        const r = await restaurantService.getBySlug(restaurantSlug)
+    const resolveContext = async () => {
+      let r = restaurant
+      if (!r) {
+        if (restaurantId) {
+          r = await restaurantService.getById(restaurantId)
+        } else {
+          r = await restaurantService.getBySlug(restaurantSlug || 'deccan-crm')
+        }
         if (r) setRestaurant(r)
       }
+
+      // Auto restore table context if lost or on refresh
+      if (r && (!restaurantId || !tableId)) {
+        const token = tableToken || 'samravaa-t01'
+        let tbl = await tableService.getByToken(token)
+        if (!tbl) {
+          const allTables = await tableService.getByRestaurant(r.id)
+          tbl = allTables[0] || null
+        }
+        if (tbl) {
+          setTableContext({
+            restaurantId: r.id,
+            tableId: tbl.id,
+            tableToken: tbl.qr_token,
+            restaurantSlug: r.slug,
+            tableNumber: tbl.table_number,
+          })
+        }
+      }
     }
-    fetchRest()
-  }, [restaurantId, restaurantSlug])
+    resolveContext()
+  }, [restaurantId, tableId, restaurantSlug, tableToken, setTableContext])
 
   const subtotal = items.reduce((s, i) => s + i.price * i.quantity, 0)
   
@@ -54,15 +75,34 @@ export function CartPage() {
 
   const handlePlaceOrder = async () => {
     if (items.length === 0) return
-    if (!restaurantId || !tableId) {
-      toast.error('Session expired. Please scan QR code again.')
+
+    let activeRestId = restaurantId || restaurant?.id
+    let activeTableId = tableId
+
+    if (!activeRestId) {
+      const r = await restaurantService.getBySlug(restaurantSlug || 'deccan-crm')
+      if (r) activeRestId = r.id
+    }
+
+    if (!activeTableId && activeRestId) {
+      const token = tableToken || 'samravaa-t01'
+      let tbl = await tableService.getByToken(token)
+      if (!tbl) {
+        const all = await tableService.getByRestaurant(activeRestId)
+        tbl = all[0] || null
+      }
+      if (tbl) activeTableId = tbl.id
+    }
+
+    if (!activeRestId || !activeTableId) {
+      toast.error('Unable to verify table session. Please re-scan table QR code.')
       return
     }
 
     setLoading(true)
     const { data: order, error } = await orderService.place({
-      restaurantId,
-      tableId,
+      restaurantId: activeRestId,
+      tableId: activeTableId,
       items,
       customerName: customerName || undefined,
       notes: notes || undefined,

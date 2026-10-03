@@ -1,16 +1,19 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { motion } from 'framer-motion'
 import {
   ShoppingBag, DollarSign, Clock, Grid3X3, TrendingUp,
-  ArrowUpRight, Receipt, Smartphone, AlertCircle, XCircle
+  ArrowUpRight, Receipt, Smartphone, AlertCircle, XCircle, RefreshCw
 } from 'lucide-react'
 import { NavLink } from 'react-router-dom'
 import { useAuth } from '@/contexts/AuthContext'
 import { analyticsService, orderService, billingService } from '@/services'
+import { supabase } from '@/lib/supabase'
+import { playAdminNewOrderSound } from '@/lib/soundEffects'
 import { SkeletonStatCard } from '@/components/ui'
 import { formatCurrency, timeAgo } from '@/lib/utils'
 import { StatusBadge } from '@/components/ui'
 import type { Order } from '@/types/database'
+import toast from 'react-hot-toast'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar
 } from 'recharts'
@@ -90,16 +93,19 @@ export function DashboardPage() {
   const [recentOrders, setRecentOrders] = useState<Order[]>([])
   const [hourlyData, setHourlyData] = useState<{ time: string; orders: number; revenue: number }[]>([])
   const [loading, setLoading] = useState(true)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const lastKnownOrderCount = useRef<number>(0)
 
-  useEffect(() => {
+  const fetchDashboardData = useCallback(async (showLoadingSpinner = false) => {
     if (!profile?.restaurant_id) return
+    if (showLoadingSpinner) setLoading(true)
+    setIsRefreshing(true)
 
-    const load = async () => {
-      setLoading(true)
+    try {
       const [dashStats, orders, billStats] = await Promise.all([
-        analyticsService.getDashboardStats(profile.restaurant_id!),
-        orderService.getByRestaurant(profile.restaurant_id!, 10),
-        billingService.getDashboardBillingMetrics(profile.restaurant_id!),
+        analyticsService.getDashboardStats(profile.restaurant_id),
+        orderService.getByRestaurant(profile.restaurant_id, 10),
+        billingService.getDashboardBillingMetrics(profile.restaurant_id),
       ])
 
       setStats({
@@ -111,31 +117,108 @@ export function DashboardPage() {
       setBillingMetrics(billStats)
       setRecentOrders(orders.slice(0, 5))
       setHourlyData(generateHourlyData(dashStats.orders))
-      setLoading(false)
+      lastKnownOrderCount.current = dashStats.todayOrders
+    } catch (err) {
+      console.error('Error fetching dashboard stats:', err)
+    } finally {
+      if (showLoadingSpinner) setLoading(false)
+      setIsRefreshing(false)
+    }
+  }, [profile?.restaurant_id])
+
+  // Initial load
+  useEffect(() => {
+    fetchDashboardData(true)
+  }, [fetchDashboardData])
+
+  // Real-time synchronization
+  useEffect(() => {
+    if (!profile?.restaurant_id) return
+
+    // 1. Supabase Postgres Realtime Subscription for incoming orders & status updates
+    const channel = supabase
+      .channel('dashboard-live-orders')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'orders',
+          filter: `restaurant_id=eq.${profile.restaurant_id}`,
+        },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            playAdminNewOrderSound()
+            toast.success(`🛎️ New Order Received! Order #${payload.new.order_number || ''}`, {
+              icon: '🍽️',
+              duration: 5000,
+            })
+          }
+          // Seamlessly re-fetch dashboard metrics
+          fetchDashboardData(false)
+        }
+      )
+      .subscribe()
+
+    // 2. Continuous 5-second polling interval (fail-safe for networks & local store)
+    const interval = setInterval(() => {
+      fetchDashboardData(false)
+    }, 5000)
+
+    // 3. Cross-tab & local storage events
+    const handleStorageEvent = (e: StorageEvent) => {
+      if (e.key === 'deccan_latest_order' || e.key === 'samravaa_demo_orders') {
+        playAdminNewOrderSound()
+        fetchDashboardData(false)
+      }
     }
 
-    load()
-  }, [profile?.restaurant_id])
+    const handleCustomOrderEvent = () => {
+      playAdminNewOrderSound()
+      fetchDashboardData(false)
+    }
+
+    window.addEventListener('storage', handleStorageEvent)
+    window.addEventListener('deccan-order-placed', handleCustomOrderEvent)
+
+    return () => {
+      supabase.removeChannel(channel)
+      clearInterval(interval)
+      window.removeEventListener('storage', handleStorageEvent)
+      window.removeEventListener('deccan-order-placed', handleCustomOrderEvent)
+    }
+  }, [profile?.restaurant_id, fetchDashboardData])
 
   const cards = stats ? statCards(stats) : []
 
   return (
     <div className="page-content space-y-8">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Dashboard</h1>
-          <p className="text-[var(--color-text-secondary)] mt-0.5">
+          <p className="text-[var(--color-text-secondary)] mt-0.5 text-xs sm:text-sm">
             {new Date().toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
           </p>
         </div>
-        <NavLink
-          to="/admin/billing"
-          className="btn btn-primary btn-sm text-xs flex items-center gap-1.5 shadow-xs"
-        >
-          <Receipt size={14} />
-          <span>POS Billing</span>
-        </NavLink>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => fetchDashboardData(false)}
+            disabled={isRefreshing}
+            className="btn btn-secondary btn-sm text-xs flex items-center gap-1.5"
+            title="Refresh dashboard stats"
+          >
+            <RefreshCw size={13} className={isRefreshing ? 'animate-spin text-[var(--color-accent)]' : ''} />
+            <span className="hidden sm:inline">Sync Live</span>
+          </button>
+          <NavLink
+            to="/admin/billing"
+            className="btn btn-primary btn-sm text-xs flex items-center gap-1.5 shadow-xs"
+          >
+            <Receipt size={14} />
+            <span>POS Billing</span>
+          </NavLink>
+        </div>
       </div>
 
       {/* POS Billing Overview (Requirement 15) */}

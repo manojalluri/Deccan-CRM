@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { immer } from 'zustand/middleware/immer'
+import { persist } from 'zustand/middleware'
 import type { CartItem } from '@/types/database'
 
 interface CartState {
@@ -28,7 +29,8 @@ interface CartState {
 }
 
 export const useCartStore = create<CartState>()(
-  immer((set, get) => ({
+  persist(
+    immer((set, get) => ({
     items: [],
     restaurantId: null,
     tableId: null,
@@ -94,5 +96,8 @@ export const useCartStore = create<CartState>()(
         state.tableNumber = ctx.tableNumber
       })
     },
-  }))
-)
+  })),
+  {
+    name: 'deccan_cart_storage',
+  }
+))

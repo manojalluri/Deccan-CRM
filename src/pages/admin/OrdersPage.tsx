@@ -112,6 +112,7 @@ export function OrdersPage() {
   useEffect(() => {
     if (!profile?.restaurant_id) return
 
+    // 1. Live Realtime Supabase Subscription
     const channel = supabase
       .channel('admin-orders')
       .on(
@@ -127,11 +128,13 @@ export function OrdersPage() {
             playAdminNewOrderSound()
             const newOrder = await orderService.getById(payload.new.id)
             if (newOrder) {
-              setOrders(prev => [newOrder, ...prev])
+              setOrders(prev => [newOrder, ...prev.filter(o => o.id !== newOrder.id)])
               toast.success(`New Order #${newOrder.order_number} — Table ${newOrder.table?.table_number}`, {
                 icon: '🛎️',
                 duration: 6000,
               })
+            } else {
+              fetchOrders()
             }
           } else if (payload.eventType === 'UPDATE') {
             setOrders(prev => prev.map(o =>
@@ -145,7 +148,30 @@ export function OrdersPage() {
       )
       .subscribe()
 
-    return () => { supabase.removeChannel(channel) }
+    // 2. 5-second background polling interval
+    const interval = setInterval(() => {
+      fetchOrders()
+    }, 5000)
+
+    // 3. Cross-tab and local storage events
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === 'deccan_latest_order' || e.key === 'samravaa_demo_orders') {
+        fetchOrders()
+      }
+    }
+    const handleCustomOrder = () => {
+      fetchOrders()
+    }
+
+    window.addEventListener('storage', handleStorage)
+    window.addEventListener('deccan-order-placed', handleCustomOrder)
+
+    return () => {
+      supabase.removeChannel(channel)
+      clearInterval(interval)
+      window.removeEventListener('storage', handleStorage)
+      window.removeEventListener('deccan-order-placed', handleCustomOrder)
+    }
   }, [profile?.restaurant_id, selectedOrder?.id])
 
   const handleStatusUpdate = async (order: Order, newStatus: OrderStatus) => {

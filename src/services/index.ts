@@ -10,17 +10,37 @@ import { demoStore, DEMO_RESTAURANT_ID } from './demoStore'
 export const restaurantService = {
   async getBySlug(slug: string): Promise<Restaurant | null> {
     if (!isSupabaseConfigured) {
-      const rest = demoStore.getRestaurant()
-      return rest.slug === slug || slug === 'samravaa' ? rest : rest
+      return demoStore.getRestaurant()
     }
 
-    const { data, error } = await supabase
+    // 1. Try exact slug match
+    let { data } = await supabase
       .from('restaurants')
       .select('*')
       .eq('slug', slug)
-      .single()
+      .maybeSingle()
 
-    if (error) return null
+    // 2. Fallback: match by known slugs or retrieve primary restaurant
+    if (!data) {
+      const fallback = await supabase
+        .from('restaurants')
+        .select('*')
+        .or('slug.eq.deccan-crm,slug.eq.samravaa,slug.eq.urban-bites')
+        .limit(1)
+        .maybeSingle()
+      data = fallback.data
+    }
+
+    // 3. Fallback: retrieve the first available restaurant
+    if (!data) {
+      const first = await supabase
+        .from('restaurants')
+        .select('*')
+        .limit(1)
+        .maybeSingle()
+      data = first.data
+    }
+
     return data
   },
 
@@ -29,13 +49,21 @@ export const restaurantService = {
       return demoStore.getRestaurant()
     }
 
-    const { data, error } = await supabase
+    let { data } = await supabase
       .from('restaurants')
       .select('*')
       .eq('id', id)
-      .single()
+      .maybeSingle()
 
-    if (error) return null
+    if (!data) {
+      const first = await supabase
+        .from('restaurants')
+        .select('*')
+        .limit(1)
+        .maybeSingle()
+      data = first.data
+    }
+
     return data
   },
 
@@ -633,6 +661,18 @@ export const orderService = {
     if (itemsError) {
       await supabase.from('orders').delete().eq('id', order.id)
       return { data: null, error: 'Failed to place order. Please try again.' }
+    }
+
+    // Broadcast order placement across tabs and windows
+    try {
+      localStorage.setItem('deccan_latest_order', JSON.stringify({
+        id: order.id,
+        restaurant_id: order.restaurant_id,
+        timestamp: Date.now()
+      }))
+      window.dispatchEvent(new CustomEvent('deccan-order-placed', { detail: order }))
+    } catch {
+      // Ignored
     }
 
     return { data: order as Order, error: null }
