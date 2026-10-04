@@ -1,5 +1,4 @@
 import { create } from 'zustand'
-import { immer } from 'zustand/middleware/immer'
 import { persist } from 'zustand/middleware'
 import type { CartItem } from '@/types/database'
 
@@ -23,81 +22,77 @@ interface CartState {
     restaurantSlug: string
     tableNumber: string
   }) => void
-
-  get totalItems(): number
-  get subtotal(): number
 }
 
 export const useCartStore = create<CartState>()(
   persist(
-    immer((set, get) => ({
-    items: [],
-    restaurantId: null,
-    tableId: null,
-    tableToken: null,
-    restaurantSlug: null,
-    tableNumber: null,
+    (set) => ({
+      items: [],
+      restaurantId: null,
+      tableId: null,
+      tableToken: null,
+      restaurantSlug: null,
+      tableNumber: null,
 
-    get totalItems() {
-      return get().items.reduce((sum, item) => sum + item.quantity, 0)
-    },
+      addItem: (newItem) => {
+        set((state) => {
+          const existing = state.items.find(i => i.menuItemId === newItem.menuItemId)
+          if (existing) {
+            return {
+              items: state.items.map(i =>
+                i.menuItemId === newItem.menuItemId
+                  ? { ...i, quantity: i.quantity + newItem.quantity }
+                  : i
+              ),
+            }
+          }
+          return { items: [...state.items, newItem] }
+        })
+      },
 
-    get subtotal() {
-      return get().items.reduce((sum, item) => sum + item.price * item.quantity, 0)
-    },
+      removeItem: (menuItemId) => {
+        set((state) => ({
+          items: state.items.filter(i => i.menuItemId !== menuItemId),
+        }))
+      },
 
-    addItem: (newItem) => {
-      set((state) => {
-        const existing = state.items.find(i => i.menuItemId === newItem.menuItemId)
-        if (existing) {
-          existing.quantity += newItem.quantity
-        } else {
-          state.items.push(newItem)
-        }
-      })
-    },
+      updateQuantity: (menuItemId, quantity) => {
+        set((state) => {
+          if (quantity <= 0) {
+            return { items: state.items.filter(i => i.menuItemId !== menuItemId) }
+          }
+          return {
+            items: state.items.map(i =>
+              i.menuItemId === menuItemId ? { ...i, quantity } : i
+            ),
+          }
+        })
+      },
 
-    removeItem: (menuItemId) => {
-      set((state) => {
-        state.items = state.items.filter(i => i.menuItemId !== menuItemId)
-      })
-    },
+      updateInstructions: (menuItemId, instructions) => {
+        set((state) => ({
+          items: state.items.map(i =>
+            i.menuItemId === menuItemId ? { ...i, specialInstructions: instructions } : i
+          ),
+        }))
+      },
 
-    updateQuantity: (menuItemId, quantity) => {
-      set((state) => {
-        if (quantity <= 0) {
-          state.items = state.items.filter(i => i.menuItemId !== menuItemId)
-        } else {
-          const item = state.items.find(i => i.menuItemId === menuItemId)
-          if (item) item.quantity = quantity
-        }
-      })
-    },
+      clearCart: () => {
+        set({ items: [] })
+      },
 
-    updateInstructions: (menuItemId, instructions) => {
-      set((state) => {
-        const item = state.items.find(i => i.menuItemId === menuItemId)
-        if (item) item.specialInstructions = instructions
-      })
-    },
-
-    clearCart: () => {
-      set((state) => {
-        state.items = []
-      })
-    },
-
-    setTableContext: (ctx) => {
-      set((state) => {
-        state.restaurantId = ctx.restaurantId
-        state.tableId = ctx.tableId
-        state.tableToken = ctx.tableToken
-        state.restaurantSlug = ctx.restaurantSlug
-        state.tableNumber = ctx.tableNumber
-      })
-    },
-  })),
-  {
-    name: 'deccan_cart_storage',
-  }
-))
+      setTableContext: (ctx) => {
+        set({
+          restaurantId: ctx.restaurantId,
+          tableId: ctx.tableId,
+          tableToken: ctx.tableToken,
+          restaurantSlug: ctx.restaurantSlug,
+          tableNumber: ctx.tableNumber,
+        })
+      },
+    }),
+    {
+      name: 'deccan_cart_storage',
+    }
+  )
+)
