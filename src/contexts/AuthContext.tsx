@@ -18,6 +18,16 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null)
 
+const PRIMARY_RESTAURANT_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+
+function sanitizeProfile(prof: Profile | null): Profile | null {
+  if (!prof) return null
+  if (!prof.restaurant_id || prof.restaurant_id === 'a1b2c3d4-e5f6-7890-abcd-ef1234567890') {
+    return { ...prof, restaurant_id: PRIMARY_RESTAURANT_ID }
+  }
+  return prof
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Initialize with cached auth if available to prevent RBAC flickering
   const [user, setUser] = useState<User | null>(() => {
@@ -35,12 +45,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const [session, setSession] = useState<Session | null>(null)
   
-  const [profile, setProfile] = useState<Profile | null>(() => {
+  const [profile, setProfileState] = useState<Profile | null>(() => {
     try {
       const saved = localStorage.getItem(AUTH_STORAGE_KEY)
       if (saved) {
         const parsed = JSON.parse(saved)
-        return parsed.profile || null
+        return sanitizeProfile(parsed.profile) || null
       }
     } catch {
       // Fallback
@@ -48,12 +58,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return null
   })
 
+  const setProfile = (p: Profile | null) => {
+    const clean = sanitizeProfile(p)
+    setProfileState(clean)
+  }
+
   const [loading, setLoading] = useState(true)
 
   const persistAuth = (u: User | null, p: Profile | null) => {
     try {
-      if (u && p) {
-        localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ user: u, profile: p }))
+      const cleanP = sanitizeProfile(p)
+      if (u && cleanP) {
+        localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify({ user: u, profile: cleanP }))
       } else {
         localStorage.removeItem(AUTH_STORAGE_KEY)
       }
@@ -73,7 +89,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (error || !data) {
         const defaultProf: Profile = {
           id: userId,
-          restaurant_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          restaurant_id: PRIMARY_RESTAURANT_ID,
           name: 'Head Chef & Admin',
           email: user?.email || 'chef@restaurant.com',
           role: fallbackRole,
@@ -83,14 +99,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (user) persistAuth(user, defaultProf)
         return defaultProf
       }
-      setProfile(data)
-      if (user) persistAuth(user, data)
-      return data
+      const cleanData = sanitizeProfile(data)!
+      setProfile(cleanData)
+      if (user) persistAuth(user, cleanData)
+      return cleanData
     } catch (err) {
       console.error('Error fetching profile:', err)
       const defaultProf: Profile = {
         id: userId,
-        restaurant_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        restaurant_id: PRIMARY_RESTAURANT_ID,
         name: 'Head Chef & Admin',
         email: user?.email || 'chef@restaurant.com',
         role: fallbackRole,
@@ -114,9 +131,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const parsed = JSON.parse(saved)
         if (parsed.user && parsed.profile) {
+          const cleanP = sanitizeProfile(parsed.profile)
           setUser(parsed.user)
-          setProfile(parsed.profile)
+          setProfile(cleanP)
           hasValidLocal = true
+          persistAuth(parsed.user, cleanP)
         }
       } catch {
         // Fallback

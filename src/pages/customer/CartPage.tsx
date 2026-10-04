@@ -125,6 +125,25 @@ export function CartPage() {
       }
 
       playCustomerOrderConfirmedSound()
+
+      // Redundant broadcast for guaranteed multi-tab sync
+      try {
+        if (typeof BroadcastChannel !== 'undefined') {
+          const bc = new BroadcastChannel('deccan_order_sync')
+          bc.postMessage({ type: 'ORDER_PLACED', order })
+          bc.close()
+        }
+        localStorage.setItem('deccan_latest_order', JSON.stringify({
+          id: order.id,
+          restaurant_id: order.restaurant_id,
+          order_number: order.order_number,
+          timestamp: Date.now()
+        }))
+        localStorage.setItem('deccan_order_event', String(Date.now()))
+      } catch {
+        // Ignored
+      }
+
       clearCart()
       navigate(`/menu/${restaurantSlug}/table/${tableToken}/order/${order.id}`)
     }

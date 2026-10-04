@@ -70,12 +70,15 @@ export function OrdersPage() {
   const [paymentInitialMode, setPaymentInitialMode] = useState<'UPI' | 'CASH'>('UPI')
   const [detailModalBill, setDetailModalBill] = useState<Bill | null>(null)
 
+  const activeRestaurantId = (profile?.restaurant_id && profile.restaurant_id !== 'a1b2c3d4-e5f6-7890-abcd-ef1234567890')
+    ? profile.restaurant_id
+    : 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+
   const fetchOrders = async () => {
-    if (!profile?.restaurant_id) return
     const [ordersData, restData, billsData] = await Promise.all([
-      orderService.getByRestaurant(profile.restaurant_id, 200),
-      restaurantService.getById(profile.restaurant_id),
-      billingService.getBillsByRestaurant(profile.restaurant_id, { status: 'all' }),
+      orderService.getByRestaurant(activeRestaurantId, 200),
+      restaurantService.getById(activeRestaurantId),
+      billingService.getBillsByRestaurant(activeRestaurantId, { status: 'all' }),
     ])
 
     setOrders(ordersData)
@@ -98,7 +101,7 @@ export function OrdersPage() {
 
   useEffect(() => {
     fetchOrders()
-  }, [profile?.restaurant_id])
+  }, [activeRestaurantId])
 
   useEffect(() => {
     if (selectedOrder) {
@@ -110,8 +113,6 @@ export function OrdersPage() {
 
 
   useEffect(() => {
-    if (!profile?.restaurant_id) return
-
     // 1. Live Realtime Supabase Subscription
     const channel = supabase
       .channel('admin-orders')
@@ -121,41 +122,59 @@ export function OrdersPage() {
           event: '*',
           schema: 'public',
           table: 'orders',
-          filter: `restaurant_id=eq.${profile.restaurant_id}`,
         },
         async (payload) => {
-          if (payload.eventType === 'INSERT') {
-            playAdminNewOrderSound()
-            const newOrder = await orderService.getById(payload.new.id)
-            if (newOrder) {
-              setOrders(prev => [newOrder, ...prev.filter(o => o.id !== newOrder.id)])
-              toast.success(`New Order #${newOrder.order_number} — Table ${newOrder.table?.table_number}`, {
-                icon: '🛎️',
-                duration: 6000,
-              })
-            } else {
-              fetchOrders()
-            }
-          } else if (payload.eventType === 'UPDATE') {
-            setOrders(prev => prev.map(o =>
-              o.id === payload.new.id ? { ...o, ...payload.new } : o
-            ))
-            if (selectedOrder?.id === payload.new.id) {
-              setSelectedOrder(prev => prev ? { ...prev, ...payload.new } : null)
+          const rec = (payload.new || payload.old) as any
+          if (!rec || !rec.restaurant_id || rec.restaurant_id === activeRestaurantId) {
+            if (payload.eventType === 'INSERT') {
+              playAdminNewOrderSound()
+              const newOrder = await orderService.getById(payload.new.id)
+              if (newOrder) {
+                setOrders(prev => [newOrder, ...prev.filter(o => o.id !== newOrder.id)])
+                toast.success(`New Order #${newOrder.order_number} — Table ${newOrder.table?.table_number || ''}`, {
+                  icon: '🛎️',
+                  duration: 6000,
+                })
+              } else {
+                fetchOrders()
+              }
+            } else if (payload.eventType === 'UPDATE') {
+              setOrders(prev => prev.map(o =>
+                o.id === payload.new.id ? { ...o, ...payload.new } : o
+              ))
+              if (selectedOrder?.id === payload.new.id) {
+                setSelectedOrder(prev => prev ? { ...prev, ...payload.new } : null)
+              }
             }
           }
         }
       )
       .subscribe()
 
-    // 2. 5-second background polling interval
+    // 2. BroadcastChannel for instant cross-tab sync
+    let bc: BroadcastChannel | null = null
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        bc = new BroadcastChannel('deccan_order_sync')
+        bc.onmessage = (event) => {
+          if (event.data?.type === 'ORDER_PLACED') {
+            playAdminNewOrderSound()
+            fetchOrders()
+          }
+        }
+      } catch (err) {
+        console.warn('BroadcastChannel error in OrdersPage:', err)
+      }
+    }
+
+    // 3. 3-second background polling interval
     const interval = setInterval(() => {
       fetchOrders()
-    }, 5000)
+    }, 3000)
 
-    // 3. Cross-tab and local storage events
+    // 4. Cross-tab and local storage events
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === 'deccan_latest_order' || e.key === 'samravaa_demo_orders') {
+      if (e.key === 'deccan_latest_order' || e.key === 'deccan_order_event' || e.key === 'samravaa_demo_orders') {
         fetchOrders()
       }
     }
@@ -169,10 +188,11 @@ export function OrdersPage() {
     return () => {
       supabase.removeChannel(channel)
       clearInterval(interval)
+      bc?.close()
       window.removeEventListener('storage', handleStorage)
       window.removeEventListener('deccan-order-placed', handleCustomOrder)
     }
-  }, [profile?.restaurant_id, selectedOrder?.id])
+  }, [activeRestaurantId, selectedOrder?.id])
 
   const handleStatusUpdate = async (order: Order, newStatus: OrderStatus) => {
     setUpdatingId(order.id)

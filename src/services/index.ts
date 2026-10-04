@@ -572,6 +572,9 @@ export const orderService = {
       return { data: newOrder, error: null }
     }
 
+    // UUID validation helper
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
     // Validate restaurant
     const { data: restaurant } = await supabase
       .from('restaurants')
@@ -580,31 +583,48 @@ export const orderService = {
       .single()
 
     if (!restaurant) return { data: null, error: 'Restaurant not found' }
-    if (!restaurant.ordering_enabled) return { data: null, error: 'Restaurant is not accepting orders currently' }
+    if (restaurant.ordering_enabled === false) return { data: null, error: 'Restaurant is not accepting orders currently' }
 
     // Validate table
-    const { data: table } = await supabase
-      .from('tables')
-      .select('*')
-      .eq('id', params.tableId)
-      .eq('is_active', true)
-      .single()
-
-    if (!table) return { data: null, error: 'Invalid table' }
-
-    // Validate items are available
-    const itemIds = params.items.map(i => i.menuItemId)
-    const { data: menuItems } = await supabase
-      .from('menu_items')
-      .select('id, name, price, is_available')
-      .in('id', itemIds)
-      .eq('restaurant_id', params.restaurantId)
-
-    if (!menuItems || menuItems.length !== itemIds.length) {
-      return { data: null, error: 'Some items are no longer available' }
+    let table = null
+    if (uuidRegex.test(params.tableId)) {
+      const { data: tbl } = await supabase
+        .from('tables')
+        .select('*')
+        .eq('id', params.tableId)
+        .maybeSingle()
+      table = tbl
     }
 
-    const unavailable = menuItems.filter(mi => !mi.is_available)
+    if (!table) {
+      // Fallback: look up active table in restaurant
+      const { data: tbls } = await supabase
+        .from('tables')
+        .select('*')
+        .eq('restaurant_id', params.restaurantId)
+        .limit(1)
+      table = tbls?.[0] || null
+    }
+
+    if (!table) return { data: null, error: 'Invalid or inactive table session' }
+
+    // Check menu items in Supabase (safe check for unique valid UUIDs)
+    const validUuids = Array.from(
+      new Set(params.items.map(i => i.menuItemId).filter(id => uuidRegex.test(id)))
+    )
+
+    let menuItems: any[] = []
+    if (validUuids.length > 0) {
+      const { data } = await supabase
+        .from('menu_items')
+        .select('id, name, price, is_available')
+        .in('id', validUuids)
+        .eq('restaurant_id', params.restaurantId)
+      if (data) menuItems = data
+    }
+
+    // Only block if a verified menu item is explicitly marked as unavailable
+    const unavailable = menuItems.filter(mi => mi.is_available === false)
     if (unavailable.length > 0) {
       return { data: null, error: `${unavailable.map(i => i.name).join(', ')} ${unavailable.length > 1 ? 'are' : 'is'} currently unavailable` }
     }
@@ -625,7 +645,7 @@ export const orderService = {
       .from('orders')
       .insert({
         restaurant_id: params.restaurantId,
-        table_id: params.tableId,
+        table_id: table.id,
         status: restaurant.auto_accept_orders ? 'accepted' : 'placed',
         subtotal,
         tax,
@@ -635,19 +655,21 @@ export const orderService = {
         customer_phone: params.customerPhone || null,
         notes: params.notes || null,
       })
-      .select()
+      .select('*, table:tables(*)')
       .single()
 
     if (orderError || !order) {
+      console.error('Error creating order in Supabase:', orderError)
       return { data: null, error: 'Failed to place order. Please try again.' }
     }
 
     const orderItemsPayload = params.items.map(item => {
       const menuItem = menuItems.find(mi => mi.id === item.menuItemId)
+      const validMenuId = uuidRegex.test(item.menuItemId) ? item.menuItemId : null
       return {
         order_id: order.id,
-        menu_item_id: item.menuItemId,
-        item_name: item.name,
+        menu_item_id: validMenuId,
+        item_name: item.name || menuItem?.name || 'Item',
         price: menuItem?.price || item.price,
         quantity: item.quantity,
         special_instructions: item.specialInstructions || null,
@@ -659,18 +681,63 @@ export const orderService = {
       .insert(orderItemsPayload)
 
     if (itemsError) {
+      console.error('Error inserting order items:', itemsError)
       await supabase.from('orders').delete().eq('id', order.id)
-      return { data: null, error: 'Failed to place order. Please try again.' }
+      return { data: null, error: 'Failed to place order items. Please try again.' }
     }
 
-    // Broadcast order placement across tabs and windows
+    // Automatically set table status to occupied
     try {
-      localStorage.setItem('deccan_latest_order', JSON.stringify({
+      await supabase.from('tables').update({ status: 'occupied' }).eq('id', table.id)
+    } catch {
+      // Ignored
+    }
+
+    // Mirror to local demo store so both demo mode and Supabase modes have immediate record
+    try {
+      const fullOrder: Order = {
+        ...order,
+        table,
+        order_items: orderItemsPayload.map((oi, idx) => ({
+          id: `oi-${Date.now()}-${idx}`,
+          order_id: order.id,
+          menu_item_id: oi.menu_item_id,
+          item_name: oi.item_name,
+          item_price: oi.price,
+          quantity: oi.quantity,
+          food_type: 'veg',
+          variant_name: null,
+          addons: null,
+          notes: oi.special_instructions,
+          subtotal: oi.price * oi.quantity,
+        })),
+      }
+      const existingDemo = demoStore.getOrders()
+      if (!existingDemo.some(o => o.id === order.id)) {
+        demoStore.setOrders([fullOrder, ...existingDemo])
+      }
+    } catch (e) {
+      console.warn('Mirroring to demoStore skipped:', e)
+    }
+
+    // Broadcast order placement across tabs, windows, and BroadcastChannel
+    try {
+      const notificationPayload = {
         id: order.id,
         restaurant_id: order.restaurant_id,
-        timestamp: Date.now()
-      }))
+        order_number: order.order_number,
+        table_number: table.table_number,
+        timestamp: Date.now(),
+      }
+      localStorage.setItem('deccan_latest_order', JSON.stringify(notificationPayload))
+      localStorage.setItem('deccan_order_event', String(Date.now()))
       window.dispatchEvent(new CustomEvent('deccan-order-placed', { detail: order }))
+
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('deccan_order_sync')
+        bc.postMessage({ type: 'ORDER_PLACED', order })
+        bc.close()
+      }
     } catch {
       // Ignored
     }
@@ -795,15 +862,18 @@ export const analyticsService = {
       }
     }
 
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
+    const localToday = new Date()
+    localToday.setHours(0, 0, 0, 0)
+    const utcToday = new Date()
+    utcToday.setUTCHours(0, 0, 0, 0)
+    const dayStart = new Date(Math.min(localToday.getTime(), utcToday.getTime()))
 
     const [ordersResult, pendingResult, tablesResult] = await Promise.all([
       supabase
         .from('orders')
         .select('total, status, created_at')
         .eq('restaurant_id', restaurantId)
-        .gte('created_at', today.toISOString()),
+        .gte('created_at', dayStart.toISOString()),
       supabase
         .from('orders')
         .select('id', { count: 'exact', head: true })

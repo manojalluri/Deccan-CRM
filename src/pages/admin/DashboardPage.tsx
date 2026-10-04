@@ -96,16 +96,19 @@ export function DashboardPage() {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const lastKnownOrderCount = useRef<number>(0)
 
+  const activeRestaurantId = (profile?.restaurant_id && profile.restaurant_id !== 'a1b2c3d4-e5f6-7890-abcd-ef1234567890')
+    ? profile.restaurant_id
+    : 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+
   const fetchDashboardData = useCallback(async (showLoadingSpinner = false) => {
-    if (!profile?.restaurant_id) return
     if (showLoadingSpinner) setLoading(true)
     setIsRefreshing(true)
 
     try {
       const [dashStats, orders, billStats] = await Promise.all([
-        analyticsService.getDashboardStats(profile.restaurant_id),
-        orderService.getByRestaurant(profile.restaurant_id, 10),
-        billingService.getDashboardBillingMetrics(profile.restaurant_id),
+        analyticsService.getDashboardStats(activeRestaurantId),
+        orderService.getByRestaurant(activeRestaurantId, 10),
+        billingService.getDashboardBillingMetrics(activeRestaurantId),
       ])
 
       setStats({
@@ -124,7 +127,7 @@ export function DashboardPage() {
       if (showLoadingSpinner) setLoading(false)
       setIsRefreshing(false)
     }
-  }, [profile?.restaurant_id])
+  }, [activeRestaurantId])
 
   // Initial load
   useEffect(() => {
@@ -133,8 +136,6 @@ export function DashboardPage() {
 
   // Real-time synchronization
   useEffect(() => {
-    if (!profile?.restaurant_id) return
-
     // 1. Supabase Postgres Realtime Subscription for incoming orders & status updates
     const channel = supabase
       .channel('dashboard-live-orders')
@@ -144,30 +145,52 @@ export function DashboardPage() {
           event: '*',
           schema: 'public',
           table: 'orders',
-          filter: `restaurant_id=eq.${profile.restaurant_id}`,
         },
         (payload) => {
-          if (payload.eventType === 'INSERT') {
-            playAdminNewOrderSound()
-            toast.success(`🛎️ New Order Received! Order #${payload.new.order_number || ''}`, {
-              icon: '🍽️',
-              duration: 5000,
-            })
+          const rec = (payload.new || payload.old) as any
+          if (!rec || !rec.restaurant_id || rec.restaurant_id === activeRestaurantId) {
+            if (payload.eventType === 'INSERT') {
+              playAdminNewOrderSound()
+              toast.success(`🛎️ New Order Received! Order #${payload.new?.order_number || ''}`, {
+                icon: '🍽️',
+                duration: 5000,
+              })
+            }
+            // Seamlessly re-fetch dashboard metrics
+            fetchDashboardData(false)
           }
-          // Seamlessly re-fetch dashboard metrics
-          fetchDashboardData(false)
         }
       )
       .subscribe()
 
-    // 2. Continuous 5-second polling interval (fail-safe for networks & local store)
+    // 2. BroadcastChannel for instant zero-latency cross-tab syncing
+    let bc: BroadcastChannel | null = null
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        bc = new BroadcastChannel('deccan_order_sync')
+        bc.onmessage = (event) => {
+          if (event.data?.type === 'ORDER_PLACED') {
+            playAdminNewOrderSound()
+            toast.success(`🛎️ New Order Received! Order #${event.data.order?.order_number || ''}`, {
+              icon: '🍽️',
+              duration: 5000,
+            })
+            fetchDashboardData(false)
+          }
+        }
+      } catch (err) {
+        console.warn('BroadcastChannel error in Dashboard:', err)
+      }
+    }
+
+    // 3. Continuous 3-second polling interval (fail-safe for networks & local store)
     const interval = setInterval(() => {
       fetchDashboardData(false)
-    }, 5000)
+    }, 3000)
 
-    // 3. Cross-tab & local storage events
+    // 4. Cross-tab & local storage events
     const handleStorageEvent = (e: StorageEvent) => {
-      if (e.key === 'deccan_latest_order' || e.key === 'samravaa_demo_orders') {
+      if (e.key === 'deccan_latest_order' || e.key === 'deccan_order_event' || e.key === 'samravaa_demo_orders') {
         playAdminNewOrderSound()
         fetchDashboardData(false)
       }
@@ -184,10 +207,11 @@ export function DashboardPage() {
     return () => {
       supabase.removeChannel(channel)
       clearInterval(interval)
+      bc?.close()
       window.removeEventListener('storage', handleStorageEvent)
       window.removeEventListener('deccan-order-placed', handleCustomOrderEvent)
     }
-  }, [profile?.restaurant_id, fetchDashboardData])
+  }, [activeRestaurantId, fetchDashboardData])
 
   const cards = stats ? statCards(stats) : []
 
